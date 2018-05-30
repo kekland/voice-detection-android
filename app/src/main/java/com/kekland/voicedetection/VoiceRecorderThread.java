@@ -55,6 +55,8 @@ public class VoiceRecorderThread extends Thread {
                     AudioFormat.ENCODING_PCM_16BIT,
                     N * 10);
 
+            AudioManager audioManager =
+                    (AudioManager)context.getSystemService(Context.AUDIO_SERVICE);
            /*track = new AudioTrack(
                    AudioManager.STREAM_MUSIC,
                    sampleRate,
@@ -72,6 +74,8 @@ public class VoiceRecorderThread extends Thread {
             long timeSpeechStopped = System.currentTimeMillis();
             boolean isSpeakingTruly = false;
             boolean speechDetectedBefore = false;
+
+            int volume_to_revert = 0;
             while(!stopped) {
                 //Log.i("AudioRecorder", "Writing data to buffer");
                 N = recorder.read(buffer, 0, buffer.length);
@@ -93,6 +97,9 @@ public class VoiceRecorderThread extends Thread {
                     if(time - timeSpeechStarted > 100 && !isSpeakingTruly) {
                         isSpeakingTruly = true;
                         Log.i("AudioRecorder", "Someone started speaking");
+
+                        volume_to_revert = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, 0, AudioManager.FLAG_PLAY_SOUND);
                     }
                 }
                 else if(!speechDetected && speechDetectedBefore){
@@ -103,6 +110,8 @@ public class VoiceRecorderThread extends Thread {
                     if(time - timeSpeechStopped > 500 && isSpeakingTruly) {
                         isSpeakingTruly = false;
                         Log.i("AudioRecorder", "Someone stopped speaking for period of " + (timeSpeechStopped - timeSpeechStarted) + "ms");
+
+                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume_to_revert, AudioManager.FLAG_PLAY_SOUND);
                     }
                 }
             }
@@ -118,7 +127,7 @@ public class VoiceRecorderThread extends Thread {
         }
     }
 
-    private static float voiceThresholdValue = 0.25f;
+    private static float voiceThresholdValue = 1f;
     private FastFourierTransform fastFourierTransform = new FastFourierTransform(bufferLength,  sampleRate);
     boolean processData(final float[] buffer) {
         fastFourierTransform.forward(buffer);
