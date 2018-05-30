@@ -7,14 +7,24 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.speech.tts.Voice;
 import android.util.Log;
 
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+
+import be.tarsos.dsp.AudioDispatcher;
+import be.tarsos.dsp.AudioEvent;
+import be.tarsos.dsp.AudioProcessor;
+import be.tarsos.dsp.io.android.AudioDispatcherFactory;
+import be.tarsos.dsp.pitch.PitchDetectionHandler;
+import be.tarsos.dsp.pitch.PitchDetectionResult;
+import be.tarsos.dsp.pitch.PitchProcessor;
 
 import static android.os.Build.VERSION_CODES.N;
 
@@ -33,12 +43,132 @@ public class VoiceRecorderThread extends Thread {
     private final int sampleRate = 44100;
     private final int channelFormat = AudioFormat.CHANNEL_IN_MONO;
     private final int encodingType = AudioFormat.ENCODING_PCM_16BIT;
+
+    long time = System.currentTimeMillis();
+    long timeSpeechStarted = System.currentTimeMillis();
+    long timeSpeechStopped = System.currentTimeMillis();
+    boolean isSpeakingTruly = false;
+    boolean speechDetectedBefore = false;
+
+    int volume_to_revert = 0;
+    Thread audioDispatcher;
     @Override
     public void run() {
-        Looper.prepare();
-        Log.i("AudioRecorder", "Starting Audio Thread");
-
         AudioRecord recorder = null;
+        AudioTrack track = null;
+        try {
+            Looper.prepare();
+            Log.i("AudioRecorder", "Starting Audio Thread");
+
+            final AudioManager audioManager =
+                    (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+
+            AudioDispatcher dispatcher = AudioDispatcherFactory.fromDefaultMicrophone(22500, 1024, 0);
+            PitchDetectionHandler handler = new PitchDetectionHandler() {
+                @Override
+                public void handlePitch(PitchDetectionResult pitchDetectionResult, AudioEvent audioEvent) {
+                    float pitch = pitchDetectionResult.getPitch();
+                    time = System.currentTimeMillis();
+                    boolean speechDetected = (pitch > 80 && pitch < 270);
+                    if (speechDetected && !speechDetectedBefore) {
+                        if (isSpeakingTruly) {
+                            speechDetectedBefore = true;
+                            isSpeakingTruly = true;
+                        } else {
+                            speechDetectedBefore = true;
+                            timeSpeechStarted = time;
+                            isSpeakingTruly = false;
+                        }
+                    } else if (speechDetected && speechDetectedBefore) {
+                        if (time - timeSpeechStarted > 50 && !isSpeakingTruly) {
+                            isSpeakingTruly = true;
+                            Log.i("AudioRecorder", "Someone started speaking");
+
+                            volume_to_revert = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume_to_revert / 2, AudioManager.FLAG_PLAY_SOUND);
+                        }
+                    } else if (!speechDetected && speechDetectedBefore) {
+                        speechDetectedBefore = false;
+                        timeSpeechStopped = System.currentTimeMillis();
+                    } else if (!speechDetected && !speechDetectedBefore) {
+                        if (time - timeSpeechStopped > 1000 && isSpeakingTruly) {
+                            isSpeakingTruly = false;
+                            Log.i("AudioRecorder", "Someone stopped speaking for period of " + (timeSpeechStopped - timeSpeechStarted) + "ms");
+
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume_to_revert, AudioManager.FLAG_PLAY_SOUND);
+                        }
+                    }
+                }
+            };
+
+            AudioProcessor processor = new PitchProcessor(PitchProcessor.PitchEstimationAlgorithm.FFT_YIN, 22500, 1024, handler);
+            dispatcher.addAudioProcessor(processor);
+            audioDispatcher = new Thread(dispatcher, "Audio Dispatcher");
+            audioDispatcher.start();
+
+            short[] buffer = new short[bufferLength];
+
+            int N = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT);
+
+            recorder = new AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    N * 10);
+
+            if(Build.VERSION.SDK_INT >= 21) {
+                AudioAttributes.Builder attrib = new AudioAttributes.Builder();
+                attrib.setContentType(AudioAttributes.CONTENT_TYPE_MUSIC);
+                attrib.setUsage(AudioAttributes.USAGE_MEDIA);
+
+                AudioFormat.Builder format = new AudioFormat.Builder();
+                format.setEncoding(AudioFormat.ENCODING_PCM_16BIT);
+                format.setChannelMask(AudioFormat.CHANNEL_OUT_MONO);
+                format.setSampleRate(sampleRate);
+
+                track = new AudioTrack(
+                        attrib.build(),
+                        format.build(),
+                        sampleRate,
+                        AudioTrack.MODE_STREAM,
+                        0);
+            }
+            else {
+                track = new AudioTrack(
+                        AudioManager.USE_DEFAULT_STREAM_TYPE,
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        N * 10,
+                        AudioTrack.MODE_STREAM);
+            }
+            recorder.startRecording();
+            track.play();
+
+            while(!stopped) {
+                N = recorder.read(buffer, 0, buffer.length);
+                if(isSpeakingTruly) {
+                    track.write(buffer, 0, buffer.length);
+                }
+            }
+        }
+        catch(Throwable e) {
+            Log.w("AudioRecorder", "Error reading voice audio", e);
+        }
+        finally {
+            recorder.stop();
+            recorder.release();
+            audioDispatcher.interrupt();
+            track.stop();
+            track.release();
+        }
+
+
+        /*AudioRecord recorder = null;
         //AudioTrack track = null;
         short[] buffer = new short[bufferLength];
 
@@ -57,17 +187,18 @@ public class VoiceRecorderThread extends Thread {
 
             AudioManager audioManager =
                     (AudioManager)context.getSystemService(Context.AUDIO_SERVICE);
-           /*track = new AudioTrack(
+           track = new AudioTrack(
                    AudioManager.STREAM_MUSIC,
                    sampleRate,
                    AudioFormat.CHANNEL_OUT_MONO,
                    AudioFormat.ENCODING_PCM_16BIT,
                    N*10,
                    AudioTrack.MODE_STREAM
-           );*/
+           );
 
             recorder.startRecording();
             //track.play();
+
 
             long time = System.currentTimeMillis();
             long timeSpeechStarted = System.currentTimeMillis();
@@ -124,7 +255,7 @@ public class VoiceRecorderThread extends Thread {
             recorder.release();
             //track.stop();
             //track.release();
-        }
+        }*/
     }
 
     private static float voiceThresholdValue = 1f;
@@ -174,5 +305,6 @@ public class VoiceRecorderThread extends Thread {
     public void close()
     {
         stopped = true;
+        audioDispatcher.interrupt();
     }
 }

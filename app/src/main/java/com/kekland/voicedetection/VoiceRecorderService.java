@@ -11,12 +11,22 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.media.AudioManager;
 import android.os.Build;
 import android.os.IBinder;
+import android.speech.tts.Voice;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.content.ContextCompat;
 import android.util.Log;
 import android.widget.RemoteViews;
+
+import be.tarsos.dsp.AudioDispatcher;
+import be.tarsos.dsp.AudioEvent;
+import be.tarsos.dsp.AudioProcessor;
+import be.tarsos.dsp.io.android.AudioDispatcherFactory;
+import be.tarsos.dsp.pitch.PitchDetectionHandler;
+import be.tarsos.dsp.pitch.PitchDetectionResult;
+import be.tarsos.dsp.pitch.PitchProcessor;
 
 /**
  * Created by kkerz on 30-May-18.
@@ -29,13 +39,20 @@ public class VoiceRecorderService extends Service {
         super.onCreate();
     }
 
+    long time = System.currentTimeMillis();
+    long timeSpeechStarted = System.currentTimeMillis();
+    long timeSpeechStopped = System.currentTimeMillis();
+    boolean isSpeakingTruly = false;
+    boolean speechDetectedBefore = false;
+
+    int volume_to_revert = 0;
     VoiceRecorderThread thread;
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent.getAction().equals(Constants.ACTION.STARTFOREGROUND_ACTION)) {
             Log.i("VoiceService", "Received Start Foreground Intent");
             showNotification();
-            thread = new VoiceRecorderThread(getApplicationContext());
+            thread = new VoiceRecorderThread(this);
             thread.start();
         }
         else if (intent.getAction().equals(Constants.ACTION.STOPFOREGROUND_ACTION)) {
